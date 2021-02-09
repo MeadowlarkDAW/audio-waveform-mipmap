@@ -11,6 +11,15 @@ pub enum DisplayMode {
     DB(f32),
 }
 
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        DisplayConfig {
+            preamp: 1.0,
+            mode: DisplayMode::Linear,
+        }
+    }
+}
+
 impl DisplayConfig {
     #[inline]
     // Generic over value type?
@@ -19,7 +28,7 @@ impl DisplayConfig {
         let value = match self.mode {
             DisplayMode::Linear => value.max(-1.).min(1.),
             DisplayMode::DB(lowest) => {
-                let db_value = 10. * value.abs().log(10.);
+                let db_value = 20. * value.abs().log10();
                 let scaled = ((db_value / lowest) + 1.).max(0.).min(1.);
                 scaled.copysign(value)
             }
@@ -35,6 +44,18 @@ pub struct SampleMipMap {
     tree: Vec<(i8, i8)>,
     layers: Vec<usize>,
 }
+
+impl Default for SampleMipMap {
+    fn default() -> Self {
+        SampleMipMap {
+            size: 0,
+            config: Default::default(),
+            tree: Vec::new(),
+            layers: Vec::new(),
+        }
+    }
+}
+
 impl SampleMipMap {
     pub fn new(data: &[f32], config: DisplayConfig) -> Self {
         let size = data.len();
