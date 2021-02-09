@@ -156,7 +156,7 @@ impl SampleMipMap {
             (left_px + pixels as i64 + 1).max(0).min(max_px),
         );
         (
-            ((interval.0 - left_px) as f64 + 0.5, (interval.1 - left_px - 1) as f64 + 0.5),
+            ((interval.0 - left_px) as f64 + 0.5, (interval.1 - left_px) as f64 - 0.5),
             (interval.0 as usize..interval.1 as usize).map(move |i| {
                 self.range_min_max(data, (i as f64 * samples_per_px) as usize, ((i+1) as f64 * samples_per_px) as usize)
             }),
@@ -204,7 +204,7 @@ impl SampleMipMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    
     static SMALL_DATA: [f32; 6] = [0., 1., -1., 0., 0.504, -0.504];
     fn make_small() -> SampleMipMap {
         assert_eq!(BASE, 4);
@@ -223,21 +223,26 @@ mod tests {
     }
 
     const EPS: f64 = 1e-4;
+    fn assert_f64_eq(a: f64, b: f64) {
+        if (a-b).abs() > EPS {
+            panic!("f64 equality assertion failed: {} != {}", a, b);
+        }
+    }
     #[test]
     fn small_query() {
         let s = make_small();
         let ((l, r), b) = s.query(&SMALL_DATA[..], 2., 3., 3);
         let v: Vec<_> = b.collect();
 
-        assert!(l - (-0.5) <= EPS);
-        assert!(r - 3.5 <= EPS);
+        assert_f64_eq(l, -0.5);
+        assert_f64_eq(r, 3.5);
         assert_eq!(v, [(127, 127), (-127, -127), (0, 0), (64, 64), (-64, -64)]);
 
         let ((l, r), b) = s.query(&SMALL_DATA[..], 0., 6., 1);
         let v: Vec<_> = b.collect();
 
-        assert!(l - 0.33333 <= EPS);
-        assert!(r - 1.0 <= EPS);
+        assert_f64_eq(l, 0.33333);
+        assert_f64_eq(r, 1.0);
         assert_eq!(v, [(-127, 127), (-64, 64)]);
     }
     
@@ -247,15 +252,15 @@ mod tests {
         let ((l, r), b) = s.query_exact(&SMALL_DATA[..], 2., 3., 3);
         let v: Vec<_> = b.collect();
 
-        assert!(l - (-0.5) <= EPS);
-        assert!(r - 4.5 <= EPS);
+        assert_f64_eq(l, -0.5);
+        assert_f64_eq(r, 3.5);
         assert_eq!(v, [(127, 127), (-127, -127), (0, 0), (64, 64), (-64, -64)]);
         
         let ((l, r), b) = s.query_exact(&SMALL_DATA[..], 0., 6., 2);
         let v: Vec<_> = b.collect();
 
-        assert!(l - 0.5 <= EPS);
-        assert!(r - 2.5 <= EPS);
+        assert_f64_eq(l, 0.5);
+        assert_f64_eq(r, 1.5);
         assert_eq!(v, [(-127, 127), (-64, 64)]);
     }
 }
