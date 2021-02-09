@@ -1,53 +1,56 @@
 use std::cmp::{max, min};
 use std::vec::Vec;
 
-pub struct DisplayConfig {
+pub struct WaveformConfig {
     preamp: f32,
-    mode: DisplayMode,
+    mode: WaveformMode,
 }
 
-pub enum DisplayMode {
+pub enum WaveformMode {
     Linear,
     DB(f32),
 }
 
-impl Default for DisplayConfig {
+impl Default for WaveformConfig {
     fn default() -> Self {
-        DisplayConfig {
+        WaveformConfig {
             preamp: 1.0,
-            mode: DisplayMode::Linear,
+            mode: WaveformMode::Linear,
         }
     }
 }
 
-impl DisplayConfig {
+impl WaveformConfig {
     #[inline]
     // Generic over value type?
-    pub fn convert_sample(&self, value: f32) -> i8 {
+    pub fn convert_sample(&self, value: f32) -> f32 {
         let value = value * self.preamp;
-        let value = match self.mode {
-            DisplayMode::Linear => value.max(-1.).min(1.),
-            DisplayMode::DB(lowest) => {
+        match self.mode {
+            WaveformMode::Linear => value.max(-1.).min(1.),
+            WaveformMode::DB(lowest) => {
                 let db_value = 20. * value.abs().log10();
                 let scaled = ((db_value / lowest) + 1.).max(0.).min(1.);
                 scaled.copysign(value)
             }
-        };
-        (value * std::i8::MAX as f32) as i8
+        }
+    }
+    #[inline]
+    pub fn compress_sample(&self, value: f32) -> i8 {
+        (self.convert_sample(value) * std::i8::MAX as f32) as i8
     }
 }
 
 pub const BASE: usize = 4;
-pub struct SampleMipMap {
+pub struct Waveform {
     size: usize,
-    config: DisplayConfig,
+    config: WaveformConfig,
     tree: Vec<(i8, i8)>,
     layers: Vec<usize>,
 }
 
-impl Default for SampleMipMap {
+impl Default for Waveform {
     fn default() -> Self {
-        SampleMipMap {
+        Waveform {
             size: 0,
             config: Default::default(),
             tree: Vec::new(),
@@ -56,8 +59,8 @@ impl Default for SampleMipMap {
     }
 }
 
-impl SampleMipMap {
-    pub fn new(data: &[f32], config: DisplayConfig) -> Self {
+impl Waveform {
+    pub fn new(data: &[f32], config: WaveformConfig) -> Self {
         let size = data.len();
         // + 64 to accomodate for rounding up. Actual upper bound is around log_BASE(size).
         let mut tree = Vec::with_capacity(size / (BASE - 1) + 64);
@@ -73,7 +76,7 @@ impl SampleMipMap {
                         data[i * BASE..]
                             .iter()
                             .take(BASE)
-                            .map(|v| config.convert_sample(*v))
+                            .map(|v| config.compress_sample(*v))
                             .fold((std::i8::MAX, std::i8::MIN), |a, b| {
                                 (min(a.0, b), max(a.1, b))
                             }),
@@ -94,7 +97,7 @@ impl SampleMipMap {
             layers.push(pos);
             pos += current_layer;
         }
-        SampleMipMap {
+        Waveform {
             size,
             config,
             tree,
@@ -106,12 +109,7 @@ impl SampleMipMap {
     ///
     /// Should produce at most around `pixels * BASE` points (if available).
     ///
-    /// Returns a tuple with two elements. The first describes the x-coordinates
-    /// of the leftmost and rightmost points of data returned *in pixel space*.
-    /// Bear in mind that these can be outside of the viewport.
-    ///
-    /// The second element of the tuple is an iterator over the `(min, max)`
-    /// values obtained.
+    /// Returns an interator yielding `(x, min, max)`. `x` is in pixel space.
     ///
     /// # Arguments
     ///
@@ -126,7 +124,7 @@ impl SampleMipMap {
         left: f64,
         width: f64,
         pixels: usize,
-    ) -> ((f64, f64), impl ExactSizeIterator<Item = (i8, i8)> + 'a) {
+    ) -> impl ExactSizeIterator<Item = (f32, f32, f32)> + 'a {
         assert!(data.len() == self.size);
         
         let padding = width / (pixels as f64);
@@ -145,28 +143,30 @@ impl SampleMipMap {
         }
         let layer_index_to_px = |i| {
             let x = (i as f64 + 0.5) * layer_piece_size;
-            (x - left) / width * (pixels as f64)
+            ((x - left) / width * (pixels as f64)) as f32
         };
+        let l_px = layer_index_to_px(interval.0);
+        let w_px_per_step = (layer_index_to_px(interval.1) - l_px) / (interval.1 - interval.0) as f32;
+
         let offset = self.layers[layer];
-        (
-            (layer_index_to_px(interval.0), layer_index_to_px(interval.1)),
-            // RangeInclusive<usize>: !ExactSizeIterator :(
-            (interval.0..(interval.1 + 1)).map(move |i| {
-                if layer == 0 {
-                    let v = self.config.convert_sample(data[i]);
-                    (v, v)
-                } else {
-                    self.tree[offset + i]
-                }
-            }),
-        )
+        // RangeInclusive<usize>: !ExactSizeIterator :(
+        (interval.0..(interval.1 + 1)).map(move |i| {
+            let x_px = l_px + w_px_per_step * (i - interval.0) as f32;
+            if layer == 0 {
+                let v = self.config.convert_sample(data[i]);
+                (x_px, v, v)
+            } else {
+                let p = self.tree[offset + i];
+                (x_px, p.0 as f32 / std::i8::MAX as f32, p.1 as f32 / std::i8::MAX as f32)
+            }
+        })
     }
     
     /// Query a range of data exactly.
     ///
     /// Produces exactly `pixels + 2` points unless querying out of bounds.
     pub fn query_exact<'a>(&'a self, data: &'a [f32], left: f64, width: f64, pixels: usize)
-        -> ((f64, f64), impl ExactSizeIterator<Item = (i8, i8)> + 'a) {
+        -> impl ExactSizeIterator<Item = (f32, f32, f32)> + 'a {
         assert!(data.len() == self.size);
         
         let samples_per_px = width / pixels as f64;
@@ -176,12 +176,11 @@ impl SampleMipMap {
             (left_px - 1).max(0).min(max_px),
             (left_px + pixels as i64 + 1).max(0).min(max_px),
         );
-        (
-            ((interval.0 - left_px) as f64 + 0.5, (interval.1 - left_px) as f64 - 0.5),
-            (interval.0 as usize..interval.1 as usize).map(move |i| {
-                self.range_min_max(data, (i as f64 * samples_per_px) as usize, ((i+1) as f64 * samples_per_px) as usize)
-            }),
-        )
+        (interval.0 as usize..interval.1 as usize).map(move |i| {
+            let x_px = (i as i64 - left_px) as f32 + 0.5;
+            let p = self.range_min_max(data, (i as f64 * samples_per_px) as usize, ((i+1) as f64 * samples_per_px) as usize);
+            (x_px, p.0 as f32 / std::i8::MAX as f32, p.1 as f32 / std::i8::MAX as f32)
+        })
     }
     
     /// Returns minimum and maximum in the sample range [left, right).
@@ -193,13 +192,13 @@ impl SampleMipMap {
         
         let mut result = (std::i8::MAX, std::i8::MIN);
         while left < right && left % BASE != 0 {
-            let v = self.config.convert_sample(data[left]);
+            let v = self.config.compress_sample(data[left]);
             result = (min(result.0, v), max(result.1, v));
             left += 1;
         }
         while left < right && right % BASE != 0 {
             right -= 1;
-            let v = self.config.convert_sample(data[right]);
+            let v = self.config.compress_sample(data[right]);
             result = (min(result.0, v), max(result.1, v));
         }
         let mut layer_iter = self.layers.iter().skip(1);
@@ -227,13 +226,13 @@ mod tests {
     use super::*;
     
     static SMALL_DATA: [f32; 6] = [0., 1., -1., 0., 0.504, -0.504];
-    fn make_small() -> SampleMipMap {
+    fn make_small() -> Waveform {
         assert_eq!(BASE, 4);
-        let config = DisplayConfig {
+        let config = WaveformConfig {
             preamp: 1.,
-            mode: DisplayMode::Linear,
+            mode: WaveformMode::Linear,
         };
-        SampleMipMap::new(&SMALL_DATA[..], config)
+        Waveform::new(&SMALL_DATA[..], config)
     }
 
     #[test]
@@ -243,45 +242,39 @@ mod tests {
         assert_eq!(s.tree, [(-127, 127), (-64, 64)]);
     }
 
-    const EPS: f64 = 1e-4;
-    fn assert_f64_eq(a: f64, b: f64) {
+    const EPS: f32 = 1e-2;
+    fn assert_f32_eq(a: f32, b: f32) {
         if (a-b).abs() > EPS {
             panic!("f64 equality assertion failed: {} != {}", a, b);
+        }
+    }
+    fn all_eq(a: impl ExactSizeIterator<Item = (f32, f32, f32)>, b: &[(f32, f32, f32)]) {
+        assert_eq!(a.len(), b.len());
+        for (u, v) in a.zip(b) {
+            assert_f32_eq(u.0, v.0);
+            assert_f32_eq(u.1, v.1);
+            assert_f32_eq(u.2, v.2);
         }
     }
     #[test]
     fn small_query() {
         let s = make_small();
-        let ((l, r), b) = s.query(&SMALL_DATA[..], 2., 3., 3);
-        let v: Vec<_> = b.collect();
+        
+        let it = s.query(&SMALL_DATA[..], 2., 3., 3);
+        all_eq(it, &[(-0.5, 1.0, 1.0), (0.5, -1.0, -1.0), (1.5, 0.0, 0.0), (2.5, 0.504, 0.504), (3.5, -0.504, -0.504)]);
 
-        assert_f64_eq(l, -0.5);
-        assert_f64_eq(r, 3.5);
-        assert_eq!(v, [(127, 127), (-127, -127), (0, 0), (64, 64), (-64, -64)]);
-
-        let ((l, r), b) = s.query(&SMALL_DATA[..], 0., 6., 1);
-        let v: Vec<_> = b.collect();
-
-        assert_f64_eq(l, 0.33333);
-        assert_f64_eq(r, 1.0);
-        assert_eq!(v, [(-127, 127), (-64, 64)]);
+        let it = s.query(&SMALL_DATA[..], 0., 6., 1);
+        all_eq(it, &[(0.3333, -1.0, 1.0), (1.0, -0.5, 0.5)]);
     }
     
     #[test]
     fn small_query_exact() {
         let s = make_small();
-        let ((l, r), b) = s.query_exact(&SMALL_DATA[..], 2., 3., 3);
-        let v: Vec<_> = b.collect();
-
-        assert_f64_eq(l, -0.5);
-        assert_f64_eq(r, 3.5);
-        assert_eq!(v, [(127, 127), (-127, -127), (0, 0), (64, 64), (-64, -64)]);
         
-        let ((l, r), b) = s.query_exact(&SMALL_DATA[..], 0., 6., 2);
-        let v: Vec<_> = b.collect();
-
-        assert_f64_eq(l, 0.5);
-        assert_f64_eq(r, 1.5);
-        assert_eq!(v, [(-127, 127), (-64, 64)]);
+        let it = s.query_exact(&SMALL_DATA[..], 2., 3., 3);
+        all_eq(it, &[(-0.5, 1.0, 1.0), (0.5, -1.0, -1.0), (1.5, 0.0, 0.0), (2.5, 0.504, 0.504), (3.5, -0.504, -0.504)]);
+        
+        let it = s.query_exact(&SMALL_DATA[..], 0., 6., 2);
+        all_eq(it, &[(0.5, -1.0, 1.0), (1.5, -0.504, 0.504)]);
     }
 }
