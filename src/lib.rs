@@ -156,7 +156,7 @@ impl SampleMipMap {
             (left_px + pixels as i64 + 1).max(0).min(max_px),
         );
         (
-            ((interval.0 - left_px) as f64 + 0.5, (interval.1 - left_px) as f64 + 0.5),
+            ((interval.0 - left_px) as f64 + 0.5, (interval.1 - left_px - 1) as f64 + 0.5),
             (interval.0 as usize..interval.1 as usize).map(move |i| {
                 self.range_min_max(data, (i as f64 * samples_per_px) as usize, ((i+1) as f64 * samples_per_px) as usize)
             }),
