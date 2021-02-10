@@ -89,7 +89,7 @@ impl Waveform {
                             .iter()
                             .take(BASE)
                             .fold((std::i8::MAX, std::i8::MIN), |a, b| {
-                                (min(a.0, b.1), max(a.1, b.1))
+                                (min(a.0, b.0), max(a.1, b.1))
                             }),
                     );
                 }
