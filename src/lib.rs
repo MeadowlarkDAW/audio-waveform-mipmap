@@ -64,8 +64,7 @@ impl Waveform {
         let size = data.len();
         // + 64 to accomodate for rounding up. Actual upper bound is around log_BASE(size).
         let mut tree = Vec::with_capacity(size / (BASE - 1) + 64);
-        let mut layers = Vec::new();
-        layers.push(0); // Bottom layer - raw samples
+        let mut layers = vec![0]; // Bottom layer (raw samples) at index zero
         let mut current_layer = size;
         let mut pos = 0;
         while current_layer >= BASE {
@@ -83,9 +82,11 @@ impl Waveform {
                     );
                 }
             } else {
+                let prev_layer_start = layers.last().unwrap();
+                let prev_layer_end = tree.len();
                 for i in 0..current_layer {
                     tree.push(
-                        tree[layers.last().unwrap() + i * BASE..]
+                        tree[prev_layer_start + i * BASE..prev_layer_end]
                             .iter()
                             .take(BASE)
                             .fold((std::i8::MAX, std::i8::MIN), |a, b| {
@@ -126,7 +127,7 @@ impl Waveform {
         pixels: usize,
     ) -> impl ExactSizeIterator<Item = (f32, f32, f32)> + 'a {
         assert!(data.len() == self.size);
-        
+
         let padding = width / (pixels as f64);
         let mut interval = (
             (((left - padding).ceil() as i64).max(0) as usize).min(self.size - 1),
@@ -146,7 +147,11 @@ impl Waveform {
             ((x - left) / width * (pixels as f64)) as f32
         };
         let l_px = layer_index_to_px(interval.0);
-        let w_px_per_step = (layer_index_to_px(interval.1) - l_px) / (interval.1 - interval.0) as f32;
+        let w_px_per_step = if interval.0 != interval.1 {
+            (layer_index_to_px(interval.1) - l_px) / (interval.1 - interval.0) as f32
+        } else {
+            0.
+        };
 
         let offset = self.layers[layer];
         // RangeInclusive<usize>: !ExactSizeIterator :(
@@ -157,18 +162,27 @@ impl Waveform {
                 (x_px, v, v)
             } else {
                 let p = self.tree[offset + i];
-                (x_px, p.0 as f32 / std::i8::MAX as f32, p.1 as f32 / std::i8::MAX as f32)
+                (
+                    x_px,
+                    p.0 as f32 / std::i8::MAX as f32,
+                    p.1 as f32 / std::i8::MAX as f32,
+                )
             }
         })
     }
-    
+
     /// Query a range of data exactly.
     ///
     /// Produces exactly `pixels + 2` points unless querying out of bounds.
-    pub fn query_exact<'a>(&'a self, data: &'a [f32], left: f64, width: f64, pixels: usize)
-        -> impl ExactSizeIterator<Item = (f32, f32, f32)> + 'a {
+    pub fn query_exact<'a>(
+        &'a self,
+        data: &'a [f32],
+        left: f64,
+        width: f64,
+        pixels: usize,
+    ) -> impl ExactSizeIterator<Item = (f32, f32, f32)> + 'a {
         assert!(data.len() == self.size);
-        
+
         let samples_per_px = width / pixels as f64;
         let max_px = (self.size as f64 / samples_per_px) as i64;
         let left_px = (left / samples_per_px) as i64;
@@ -178,18 +192,27 @@ impl Waveform {
         );
         (interval.0 as usize..interval.1 as usize).map(move |i| {
             let x_px = (i as i64 - left_px) as f32 + 0.5;
-            let p = self.range_min_max(data, (i as f64 * samples_per_px) as usize, ((i+1) as f64 * samples_per_px) as usize);
-            (x_px, p.0 as f32 / std::i8::MAX as f32, p.1 as f32 / std::i8::MAX as f32)
+            let left = (i as f64 * samples_per_px) as usize;
+            let mut right = ((i + 1) as f64 * samples_per_px) as usize;
+            if left == right {
+                right += 1;
+            }
+            let p = self.range_min_max(data, left, right);
+            (
+                x_px,
+                p.0 as f32 / std::i8::MAX as f32,
+                p.1 as f32 / std::i8::MAX as f32,
+            )
         })
     }
-    
+
     /// Returns minimum and maximum in the sample range [left, right).
     ///
     /// O(BASE * log_BASE(right - left))
     fn range_min_max(&self, data: &[f32], mut left: usize, mut right: usize) -> (i8, i8) {
         left = max(left, 0);
         right = min(right, self.size);
-        
+
         let mut result = (std::i8::MAX, std::i8::MIN);
         while left < right && left % BASE != 0 {
             let v = self.config.compress_sample(data[left]);
@@ -224,7 +247,7 @@ impl Waveform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     static SMALL_DATA: [f32; 6] = [0., 1., -1., 0., 0.504, -0.504];
     fn make_small() -> Waveform {
         assert_eq!(BASE, 4);
@@ -243,38 +266,69 @@ mod tests {
     }
 
     const EPS: f32 = 1e-2;
-    fn assert_f32_eq(a: f32, b: f32) {
-        if (a-b).abs() > EPS {
-            panic!("f64 equality assertion failed: {} != {}", a, b);
-        }
+    fn f32_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() <= EPS
     }
     fn all_eq(a: impl ExactSizeIterator<Item = (f32, f32, f32)>, b: &[(f32, f32, f32)]) {
         assert_eq!(a.len(), b.len());
         for (u, v) in a.zip(b) {
-            assert_f32_eq(u.0, v.0);
-            assert_f32_eq(u.1, v.1);
-            assert_f32_eq(u.2, v.2);
+            assert!(f32_eq(u.0, v.0));
+            assert!(f32_eq(u.1, v.1));
+            assert!(f32_eq(u.2, v.2));
         }
     }
     #[test]
     fn small_query() {
         let s = make_small();
-        
+
         let it = s.query(&SMALL_DATA[..], 2., 3., 3);
-        all_eq(it, &[(-0.5, 1.0, 1.0), (0.5, -1.0, -1.0), (1.5, 0.0, 0.0), (2.5, 0.504, 0.504), (3.5, -0.504, -0.504)]);
+        all_eq(
+            it,
+            &[
+                (-0.5, 1.0, 1.0),
+                (0.5, -1.0, -1.0),
+                (1.5, 0.0, 0.0),
+                (2.5, 0.504, 0.504),
+                (3.5, -0.504, -0.504),
+            ],
+        );
 
         let it = s.query(&SMALL_DATA[..], 0., 6., 1);
         all_eq(it, &[(0.3333, -1.0, 1.0), (1.0, -0.5, 0.5)]);
     }
-    
+
     #[test]
     fn small_query_exact() {
         let s = make_small();
-        
+
         let it = s.query_exact(&SMALL_DATA[..], 2., 3., 3);
-        all_eq(it, &[(-0.5, 1.0, 1.0), (0.5, -1.0, -1.0), (1.5, 0.0, 0.0), (2.5, 0.504, 0.504), (3.5, -0.504, -0.504)]);
-        
+        all_eq(
+            it,
+            &[
+                (-0.5, 1.0, 1.0),
+                (0.5, -1.0, -1.0),
+                (1.5, 0.0, 0.0),
+                (2.5, 0.504, 0.504),
+                (3.5, -0.504, -0.504),
+            ],
+        );
+
         let it = s.query_exact(&SMALL_DATA[..], 0., 6., 2);
         all_eq(it, &[(0.5, -1.0, 1.0), (1.5, -0.504, 0.504)]);
+    }
+
+    #[test]
+    fn query_zeros() {
+        let data = vec![0.; 63];
+        let s = Waveform::new(&data, Default::default());
+        for pixels in 16..64 {
+            for width in 1..70 {
+                let width = width as f64;
+                let mut it = s.query(&data, -5., width, pixels);
+                assert!(it.all(|(_, min, max)| f32_eq(min, 0.) && f32_eq(max, 0.)));
+                let mut it = s.query_exact(&data, -5., width, pixels);
+                assert!(it.all(|(_, min, max)| f32_eq(min, 0.) && f32_eq(max, 0.)));
+            }
+        }
     }
 }
